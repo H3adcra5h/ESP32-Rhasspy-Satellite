@@ -85,6 +85,7 @@
 #define M5ATOMECHO 0
 #define MATRIXVOICE 1
 #define AUDIOKIT 2
+#define MYKIT 3
 
 // This is where you can include your device, make sure to create a *device
 // The *device is used to call methods 
@@ -97,6 +98,9 @@
 #elif DEVICE_TYPE == AUDIOKIT
   #include "devices/AudioKit.hpp"
   AudioKit *device = new AudioKit();
+#elif DEVICE_TYPE == MYKIT
+  #include "devices/MyKit.hpp"
+  MyKit *device = new MyKit();
 #endif
 
 #include <General.hpp>
@@ -137,7 +141,7 @@ void setup() {
       Serial.println("\nEnd");
     })
     .onProgress([](unsigned int progress, unsigned int total) {
-      Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+      Serial.printf("Progress: %u%%\r\n", (progress / (total / 100)));
     })
     .onError([](ota_error_t error) {
       Serial.printf("Error[%u]: ", error);
