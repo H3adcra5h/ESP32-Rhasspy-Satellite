@@ -85,6 +85,7 @@
 #define M5ATOMECHO 0
 #define MATRIXVOICE 1
 #define AUDIOKIT 2
+#define RESPEAKER2 3
 
 // This is where you can include your device, make sure to create a *device
 // The *device is used to call methods 
@@ -97,6 +98,9 @@
 #elif DEVICE_TYPE == AUDIOKIT
   #include "devices/AudioKit.hpp"
   AudioKit *device = new AudioKit();
+#elif DEVICE_TYPE == RESPEAKER2
+  #include "devices/Respeaker2.hpp"
+  Respeaker2 *device = new Respeaker2();
 #endif
 
 #include <General.hpp>
