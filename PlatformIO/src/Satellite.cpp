@@ -75,6 +75,13 @@
       Will hopefully be replaced by a porcupine lib soon
    v7.1:
     - Audio task should run on core 1
+   v7.2:
+    - Added static IP configuration
+    - Fix reboot when HW_LOCAL is set
+   v7.3
+    - Fix double creation of I2Stask
+   v7.4
+    - Added taskdelay for better stability on I2Stask
 * ************************************************************************ */
 
 #include <Arduino.h>
