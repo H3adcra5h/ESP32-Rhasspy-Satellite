@@ -30,8 +30,8 @@ class HotwordDetected : public StateMachine
     device->updateBrightness(config.hotword_brightness);
     if (xSemaphoreTake(wbSemaphore, (TickType_t)10000) == pdTRUE) {
       device->updateColors(COLORS_HOTWORD);
+      xSemaphoreGive(wbSemaphore);
     }
-    xSemaphoreGive(wbSemaphore);
     initHeader(device->readSize, device->width, device->rate);
     xEventGroupSetBits(audioGroup, STREAM);
   }
@@ -67,14 +67,10 @@ class Idle : public StateMachine
     device->updateBrightness(config.brightness);
     if (xSemaphoreTake(wbSemaphore, (TickType_t)10000) == pdTRUE) {
       device->updateColors(COLORS_IDLE);
+      xSemaphoreGive(wbSemaphore);
     }
-    xSemaphoreGive(wbSemaphore);
     initHeader(device->readSize, device->width, device->rate);
-    // start streaming audio to the remote endpoint for hotword detection
-    if (config.hotword_detection == HW_REMOTE)
-    {
-      xEventGroupSetBits(audioGroup, STREAM);
-    }
+    xEventGroupSetBits(audioGroup, STREAM);
   }
 
   void run(void) override {
@@ -152,14 +148,15 @@ class MQTTDisconnected : public StateMachine {
       asyncClient.onMessage(onMqttMessage);
       mqttInitialized = true;
     }
+    Serial.printf("Connecting MQTT: %s, %d\n", config.mqtt_host.c_str(), config.mqtt_port);
     asyncClient.setClientId(SITEID);
-    asyncClient.setServer(config.mqtt_host, config.mqtt_port);
-    asyncClient.setCredentials(MQTT_USER, MQTT_PASS);
-    audioServer.setServer(config.mqtt_host, config.mqtt_port);
+    asyncClient.setServer(config.mqtt_host.c_str(), config.mqtt_port);
+    asyncClient.setCredentials(config.mqtt_user.c_str(), config.mqtt_pass.c_str());
+    audioServer.setServer(config.mqtt_host.c_str(), config.mqtt_port);
     char clientID[100];
-    sprintf(clientID, "%sAudio", SITEID);
-   asyncClient.connect();
-    audioServer.connect(clientID, MQTT_USER, MQTT_PASS);
+    snprintf(clientID, 100, "%sAudio", SITEID);
+    asyncClient.connect();
+    audioServer.connect(clientID, config.mqtt_user.c_str(), config.mqtt_pass.c_str());
   }
 
   void run(void) override {
@@ -169,6 +166,7 @@ class MQTTDisconnected : public StateMachine {
       currentMillis = millis();
       if (currentMillis - startMillis > 5000) {
         Serial.println("Connect failed, retry");
+        Serial.printf("Audio connected: %d, Async connected: %d\n", audioServer.connected(), asyncClient.connected());
         transit<MQTTDisconnected>();
       }      
     }
@@ -187,7 +185,7 @@ class WifiConnected : public StateMachine
 {
   void entry(void) override {
     Serial.println("Enter WifiConnected");
-    Serial.println("Connected to Wifi with IP: " + WiFi.localIP().toString());
+    Serial.printf("Connected to Wifi with IP: %s, SSID: %s, BSSID: %s, RSSI: %d\n", WiFi.localIP().toString().c_str(), WiFi.SSID().c_str(), WiFi.BSSIDstr().c_str(), WiFi.RSSI());
     xEventGroupClearBits(audioGroup, PLAY);
     xEventGroupClearBits(audioGroup, STREAM);
     device->updateBrightness(config.brightness);
@@ -212,7 +210,12 @@ class WifiDisconnected : public StateMachine
     device->muteOutput(true);
     xEventGroupClearBits(audioGroup, STREAM);
     xEventGroupClearBits(audioGroup, PLAY);
-    xTaskCreatePinnedToCore(I2Stask, "I2Stask", 30000, NULL, 3, NULL, 0);
+    if (i2sHandle == NULL) {
+      Serial.println("Creating I2Stask");
+      xTaskCreatePinnedToCore(I2Stask, "I2Stask", 30000, NULL, 3, &i2sHandle, 0);
+    } else {
+      Serial.println("We already have a I2Stask");
+    }
     Serial.println("Enter WifiDisconnected");
     Serial.printf("Total heap: %d\r\n", ESP.getHeapSize());
     Serial.printf("Free heap: %d\r\n", ESP.getFreeHeap());
@@ -242,7 +245,44 @@ class WifiDisconnected : public StateMachine
 
     WiFi.onEvent(WiFiEvent);
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+    // find best AP (BSSID) if there are several AP for a given SSID
+    // https://github.com/arendst/Tasmota/blob/db615c5b0ba0053c3991cf40dd47b0d484ac77ae/tasmota/support_wifi.ino#L261
+    // https://esp32.com/viewtopic.php?t=18979
+    #if defined(SCAN_STRONGEST_AP)
+      Serial.println("WiFi scan start");
+      int n = WiFi.scanNetworks(); // WiFi.scanNetworks will return the number of networks found
+      // or WIFI_SCAN_RUNNING   (-1), WIFI_SCAN_FAILED    (-2)
+
+      Serial.printf("WiFi scan done, result %d\n", n);
+      if (n <= 0) {
+        Serial.println("error or no networks found");
+      } else {
+        for (int i = 0; i < n; ++i) {
+          // Print metrics for each network found
+          Serial.printf("%d: BSSID: %s  %ddBm, %d%% %s, %s (%d)\n", i + 1, WiFi.BSSIDstr(i).c_str(), WiFi.RSSI(i), constrain(2 * (WiFi.RSSI(i) + 100), 0, 100),
+            (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "open     " : "encrypted", WiFi.SSID(i).c_str(), WiFi.channel(i));
+        }
+      }
+      Serial.println();
+
+      // find first that matches SSID. Expect results to be sorted by signal strength.
+      int i = 0;
+      while ( String(WIFI_SSID) != String(WiFi.SSID(i)) && (i < n)) {
+        i++;
+      }
+
+      if (i == n || n < 0) {
+        Serial.println("No network with SSID " WIFI_SSID " found!");
+        WiFi.begin(WIFI_SSID, WIFI_PASS); // try basic method anyway
+      } else {
+        Serial.printf("SSID match found at index: %d\n", i + 1);
+        WiFi.begin(WIFI_SSID, WIFI_PASS, 0, WiFi.BSSID(i)); // pass selected BSSID
+      }
+    #else
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+    #endif
+
     while (WiFi.waitForConnectResult() != WL_CONNECTED) {
         retryCount++;
         if (retryCount > 2) {
@@ -541,16 +581,21 @@ void I2Stask(void *p) {
       uint8_t data[device->readSize * device->width];
       if (audioServer.connected()) {
         if (device->readAudio(data, device->readSize * device->width)) {
-          //Rhasspy needs an audiofeed of 512 bytes+header per message
-          //Some devices, like the Matrix Voice do 512 16 bit read in one mic read
-          //This is 1024 bytes, so two message are needed in that case
-          const int messageBytes = 512;
-          uint8_t payload[sizeof(header) + messageBytes];
-          const int message_count = sizeof(data) / messageBytes;
-          for (int i = 0; i < message_count; i++) {
-            memcpy(payload, &header, sizeof(header));
-            memcpy(&payload[sizeof(header)], &data[messageBytes * i], messageBytes);
-            audioServer.publish(audioFrameTopic.c_str(),(uint8_t *)payload, sizeof(payload));
+          // only send audio if hotword_detection is HW_REMOTE.
+          //TODO when LOCAL is supported: check if hotword is detected and send audio as well in that case
+          if (config.hotword_detection == HW_REMOTE)
+          {
+            //Rhasspy needs an audiofeed of 512 bytes+header per message
+            //Some devices, like the Matrix Voice do 512 16 bit read in one mic read
+            //This is 1024 bytes, so two message are needed in that case
+            const int messageBytes = 512;
+            uint8_t payload[sizeof(header) + messageBytes];
+            const int message_count = sizeof(data) / messageBytes;
+            for (int i = 0; i < message_count; i++) {
+              memcpy(payload, &header, sizeof(header));
+              memcpy(&payload[sizeof(header)], &data[messageBytes * i], messageBytes);
+              audioServer.publish(audioFrameTopic.c_str(),(uint8_t *)payload, sizeof(payload));
+            }
           }
         } else {
           //Loop, because otherwise this causes timeouts
@@ -562,6 +607,10 @@ void I2Stask(void *p) {
       }
       xSemaphoreGive(wbSemaphore); 
     }
+
+    //Added for stability when neither PLAY or STREAM is set.
+    vTaskDelay(10);
+
   }  
   vTaskDelete(NULL);
 }
